@@ -1,0 +1,128 @@
+---
+- hosts: web
+  become: true
+
+  vars: 
+    mysql_root_password: test
+    wp_mysql_db: wordpress
+    wp_mysql_user: wordpress
+    wp_mysql_password: password11
+
+  tasks:
+#    - name: upgrade all packages
+#      yum: name='*' state=latest lock_timeout=180
+
+    - name: Install pre-check package
+      command: sudo amazon-linux-extras install -y lamp-mariadb10.2-php7.2 php7.2
+
+    - name: wait to release the lock
+      wait_for: timeout=10
+
+    - name: Install all packages 
+      yum:
+        name:
+          - mariadb-server
+          - httpd
+          - php-mysqlnd
+          - python2-pip
+        update_cache: yes
+        state: latest
+        lock_timeout: 180
+
+    - name: Make sure pymysql is present
+      become: true
+      pip: name=pymysql state=present
+
+    - name: start httpd
+      service: name=httpd enabled=yes state=started
+
+    - name: start mariadb
+      service: name=mariadb enabled=yes state=started
+
+      # Now setup the database 
+    - name: update mysql root password for all root accounts
+      mysql_user:
+        name: root
+        host: "{{ item }}"
+        password: "{{ mysql_root_password }}"
+        login_user: root
+        login_password: "{{ mysql_root_password }}"
+        check_implicit_admin: yes
+        priv: "*.*:ALL,GRANT"
+      with_items:
+        - "{{ ansible_hostname }}"
+        - 127.0.0.1
+        - ::1
+        - localhost
+
+    - name: Create .my.cnf file with root password credentials
+      sudo: yes
+      template: src=my.cnf.j2 dest=/root/.my.cnf owner=root group=root mode=0600
+      notify: 
+      - restart mysql
+
+    - name: Create mysql database wordpress
+      mysql_db:
+        login_user: root
+        login_password: "{{ mysql_root_password }}"
+        name: "{{ wp_mysql_db }}"
+        state: present
+
+    - name: Create user in DB
+      become: true
+      mysql_user: 
+        name: "{{ wp_mysql_user }}"
+        password: "{{ wp_mysql_password }}"
+        priv: '*.*:ALL'
+        host: 'localhost' 
+        state: present 
+        login_user: root 
+        login_password: "{{ mysql_root_password }}"
+
+     # installing wordpress
+     
+    - name: installing latest wordpress file
+      get_url: url=https://wordpress.org/latest.tar.gz dest=/root/wordpress.tar.gz
+
+    - name: extract wordpress file
+      unarchive: src=/root/wordpress.tar.gz dest=/var/www/ copy=no
+      become: yes
+
+    - name: Update default Apache site
+      become: yes
+      lineinfile: dest=/etc/httpd/conf/httpd.conf regexp="(.)+DocumentRoot /var/www/html" line="DocumentRoot /var/www/wordpress"
+
+    - name: Copy sample config file
+      command: mv /var/www/wordpress/wp-config-sample.php /var/www/wordpress/wp-config.php creates=/var/www/wordpress/wp-config.php
+      become: yes
+
+    - name: replace the db file
+      become: yes
+      replace:
+        path: /var/www/wordpress/wp-config.php
+        regexp: 'database_name_here'
+        replace: '{{wp_mysql_db}}'
+
+    - name: replace user name
+      become: yes
+      replace:
+        path: /var/www/wordpress/wp-config.php
+        regexp: 'username_here'
+        replace: '{{wp_mysql_user}}'
+
+    - name: replace the password
+      become: yes
+      replace:
+        path: /var/www/wordpress/wp-config.php
+        regexp: 'password_here'
+        replace: '{{wp_mysql_password}}'
+
+    - name: restart httpd
+      service: name=httpd state=restarted
+      become: yes
+
+  handlers:
+    - name: restart mysql
+      service: name=mariadb  state=restarted
+
+
